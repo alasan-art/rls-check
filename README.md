@@ -8,7 +8,11 @@ AI app builders get you most of the way to a working app. But many of these apps
 - **Zero dependencies.** You only need Node.js 18 or newer.
 - **It is not a full security review.** It catches the common mistakes, not everything.
 
-## Quick start
+## Use it in your browser (no install)
+
+Open **https://alasan-art.github.io/rls-check/**, then drag in your project folder (or click *See an example*). The page runs entirely in your browser: its security policy blocks all network requests, so your files can't leave your computer.
+
+## Quick start (command line)
 
 ```bash
 git clone https://github.com/alasan-art/rls-check.git
@@ -86,6 +90,8 @@ We tested v0.2 on 30 public open-source Supabase projects built with AI tools (a
 - "Browser code" vs "server code" is guessed from folder names (`supabase/functions`, `api`, `server`, …).
 
 ## Development
+
+The checks live in `core.mjs`, which has no file-system or network code. `rls-check.mjs` (command line) and `index.html` + `page.mjs` (browser page) are thin front ends around it.
 
 ```bash
 npm test
