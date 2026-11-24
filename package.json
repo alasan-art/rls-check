@@ -1,0 +1,11 @@
+{
+  "name": "rls-check",
+  "version": "0.1.0",
+  "description": "Free offline checker for common Supabase security holes in AI-built apps (Lovable, Bolt, Replit, Cursor).",
+  "type": "module",
+  "bin": { "rls-check": "./rls-check.mjs" },
+  "scripts": { "test": "node --test test/" },
+  "engines": { "node": ">=18" },
+  "keywords": ["supabase", "rls", "security", "lovable", "bolt", "replit", "stripe"],
+  "license": "MIT"
+}
