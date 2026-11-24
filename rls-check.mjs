@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// rls-check v0.1.0 — offline security check for Supabase apps built with Lovable / Bolt / Replit / Cursor.
+// rls-check v0.2.0 — offline security check for Supabase apps built with Lovable / Bolt / Replit / Cursor.
 // Reads a project folder only. No network, no Supabase login, no dependencies.
 // Usage: node rls-check.mjs <project-folder> [--json]
 // Exit code: 1 if any HIGH finding, else 0.
@@ -70,6 +70,8 @@ export function analyzeSql(files) {
   // files: [{file, sql}] in apply order
   const tables = new Map(); // name -> {file, rls:false, policies:[]}
   const findings = [];
+  const buckets = [];          // public buckets
+  const storagePolicies = [];  // policies on storage.objects
   const ID = '((?:"[^"]+"|[\\w]+)(?:\\.(?:"[^"]+"|[\\w]+))?)';
 
   for (const { file, sql: rawSql } of files) {
@@ -79,6 +81,17 @@ export function analyzeSql(files) {
       const s = st.trim();
       if (!s) continue;
       let m;
+      if (/^insert\s+into\s+"?storage"?\."?buckets"?/i.test(s)) {
+        // insert into storage.buckets (id, name, public) values ('docs', 'docs', true), (...)
+        const cols = (s.match(/buckets"?\s*\(([^)]*)\)/i)?.[1] || '').split(',').map(c => c.trim().replace(/"/g, '').toLowerCase());
+        const vi = s.search(/\bvalues\b/i);
+        const rows = vi >= 0 ? [...s.slice(vi).matchAll(/\(([^()]*)\)/g)].map(r => r[1].split(',').map(v => v.trim().replace(/^'|'$/g, ''))) : [];
+        const ip = cols.indexOf('public'), ii = cols.indexOf('id') >= 0 ? cols.indexOf('id') : cols.indexOf('name');
+        for (const r of rows) {
+          if (ip >= 0 && /^true$/i.test(r[ip] || '')) buckets.push({ id: r[ii] || '?', file });
+        }
+        continue;
+      }
       if ((m = s.match(new RegExp(`^create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?${ID}`, 'i')))) {
         const t = tableName(m[1]);
         if (t && !tables.has(t)) tables.set(t, { file, rls: false, policies: [] });
@@ -90,7 +103,6 @@ export function analyzeSql(files) {
         }
       } else if ((m = s.match(new RegExp(`^create\\s+policy\\s+("[^"]+"|\\w+)\\s+on\\s+${ID}`, 'i')))) {
         const t = tableName(m[2]);
-        if (!t) continue;
         const cmd = (s.match(/\bfor\s+(all|select|insert|update|delete)\b/i)?.[1] || 'all').toLowerCase();
         const roles = (s.match(/\bto\s+([\w\s,"]+?)(?=\s+(?:using|with\s+check)\b|$)/i)?.[1] || 'public')
           .toLowerCase().replace(/"/g, '').split(',').map(r => r.trim());
@@ -98,6 +110,11 @@ export function analyzeSql(files) {
         const ci = s.search(/\bwith\s+check\s*\(/i);
         const using = ui >= 0 ? balanced(s, ui) : null;
         const check = ci >= 0 ? balanced(s, ci) : null;
+        if (/^"?storage"?\."?objects"?$/i.test(m[2])) {
+          storagePolicies.push({ name: m[1].replace(/"/g, ''), cmd, roles, using, check, file });
+          continue;
+        }
+        if (!t) continue;
         if (!tables.has(t)) tables.set(t, { file, rls: false, policies: [] });
         tables.get(t).policies.push({ name: m[1].replace(/"/g, ''), cmd, roles, using, check, file });
       } else if ((m = s.match(new RegExp(`^drop\\s+policy\\s+(?:if\\s+exists\\s+)?("[^"]+"|\\w+)\\s+on\\s+${ID}`, 'i')))) {
@@ -150,6 +167,22 @@ export function analyzeSql(files) {
       }
     }
   }
+  // Storage (uploaded files)
+  for (const b of buckets) {
+    findings.push({ level: 'MEDIUM', code: 'STORAGE_BUCKET_PUBLIC', where: b.file, item: b.id,
+      text: `Storage bucket "${b.id}" is public: anyone with a file's link can open it, no login needed. Fine for product photos; not for IDs, invoices, contracts or user uploads. Set public = false and use signed URLs.` });
+  }
+  const ownerCheck = e => /auth\.uid\(\)|auth\.jwt\(\)|storage\.foldername/i.test(e || '');
+  for (const p of storagePolicies) {
+    const cond = `${p.using || ''} ${p.check || ''}`;
+    if (p.cmd !== 'select' && !ownerCheck(cond)) {
+      findings.push({ level: 'HIGH', code: 'STORAGE_OPEN_WRITE', where: p.file, item: `storage / ${p.name}`,
+        text: `Storage policy "${p.name}" lets ${anonish(p.roles) ? 'anyone' : 'any logged-in user'} ${p.cmd === 'all' ? 'upload, overwrite and delete' : p.cmd} files without checking who owns them. Add a check such as (storage.foldername(name))[1] = auth.uid()::text.` });
+    } else if (p.cmd === 'select' && anonish(p.roles) && !ownerCheck(cond)) {
+      findings.push({ level: 'MEDIUM', code: 'STORAGE_OPEN_READ', where: p.file, item: `storage / ${p.name}`,
+        text: `Storage policy "${p.name}" lets anyone, even logged out, list and download the files it covers. Fine only for public files.` });
+    }
+  }
   return { tables: [...tables.keys()], findings };
 }
 
@@ -158,6 +191,58 @@ function decodeJwtRole(tok) {
     const payload = JSON.parse(Buffer.from(tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
     return payload.role || null;
   } catch { return null; }
+}
+
+const AI_KEYS = [
+  [/\bsk-ant-[A-Za-z0-9_-]{20,}/, 'Anthropic'],
+  [/\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}/, 'OpenAI'],
+  [/\bgsk_[A-Za-z0-9]{30,}/, 'Groq'],
+  [/\br8_[A-Za-z0-9]{30,}/, 'Replicate'],
+  [/\bxai-[A-Za-z0-9]{30,}/, 'xAI'],
+  [/\bpplx-[A-Za-z0-9]{30,}/, 'Perplexity'],
+  [/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/, 'SendGrid'],
+  [/\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{16,}/, 'Resend'],
+];
+
+// Server-side code: Supabase edge functions, API routes, server folders, *.server.* files
+function isBrowserFile(file) {
+  const p = file.split(path.sep).join('/');
+  if (/(^|\/)\.env/.test(p)) return false;
+  return !/(^|\/)(supabase\/functions|netlify\/functions|api|server|backend|functions|pages\/api|app\/api)\//.test(p) &&
+         !/\.server\.[jt]sx?$/.test(p);
+}
+
+// Minimal reader for supabase/config.toml: sections + key = value
+export function analyzeConfig(configs, functionCode) {
+  // configs: [{file, text}]; functionCode: Map(name -> concatenated code of supabase/functions/<name>/)
+  const findings = [];
+  for (const { file, text } of configs) {
+    let section = '';
+    for (const line of text.split('\n')) {
+      const l = line.replace(/#.*$/, '').trim();
+      const sec = l.match(/^\[([^\]]+)\]$/);
+      if (sec) { section = sec[1].trim(); continue; }
+      const kv = l.match(/^([\w.]+)\s*=\s*(.+)$/);
+      if (!kv) continue;
+      const key = kv[1], val = kv[2].trim().replace(/^"|"$/g, '');
+      const fn = section.match(/^functions\.("?)([\w-]+)\1$/);
+      if (fn && key === 'verify_jwt' && val === 'false') {
+        const name = fn[2];
+        const code = functionCode.get(name) || '';
+        const isWebhook = /webhook|stripe|callback|hook/i.test(name) || /constructEvent|svix|x-signature|stripe-signature/i.test(code);
+        const ownAuth = /auth\.getUser\s*\(|getUser\s*\(|verifyJwt|jwtVerify|getClaims\s*\(|req\.headers\.get\(\s*['"]authorization['"]\s*\)/i.test(code);
+        if (!isWebhook && !ownAuth) {
+          findings.push({ level: 'HIGH', code: 'FUNCTION_NO_AUTH', where: file, item: name,
+            text: `Server function "${name}" has the login check switched off (verify_jwt = false) and its code doesn't check the user itself. Anyone on the internet can call it${/openai|anthropic|gemini|resend|stripe|service_role|SERVICE_ROLE/i.test(code) ? ', and it uses paid services or admin rights' : ''}. Set verify_jwt = true, or check the user with supabase.auth.getUser().` });
+        }
+      }
+      if (section === 'auth.email' && key === 'enable_confirmations' && val === 'false') {
+        findings.push({ level: 'INFO', code: 'EMAIL_CONFIRM_OFF', where: file, item: 'auth.email',
+          text: `Email confirmation is off in this config (common for local testing). Make sure it is ON in your live project (Authentication → Sign In / Providers → Email), otherwise anyone can sign up with someone else's email address.` });
+      }
+    }
+  }
+  return { findings };
 }
 
 export function analyzeCode(files) {
@@ -175,6 +260,26 @@ export function analyzeCode(files) {
     if (/\b(VITE_|NEXT_PUBLIC_|REACT_APP_|EXPO_PUBLIC_|PUBLIC_)\w*SERVICE_ROLE\w*/.test(text)) {
       findings.push({ level: 'HIGH', code: 'SERVICE_KEY_PUBLIC_ENV', where: file, item: base,
         text: `"${base}" puts the service_role key in a public (browser) env variable. Browsers can read it.` });
+    }
+    // Paid API keys in browser-visible env variables (someone else runs up your bill)
+    const pubEnv = new Set();
+    for (const mm of text.matchAll(/\b((?:VITE_|NEXT_PUBLIC_|REACT_APP_|EXPO_PUBLIC_|PUBLIC_)\w*?(OPENAI|ANTHROPIC|CLAUDE|GEMINI|GOOGLE_AI|GROQ|MISTRAL|REPLICATE|ELEVENLABS|PERPLEXITY|DEEPSEEK|XAI|RESEND|SENDGRID|MAILGUN|TWILIO|STRIPE_SECRET)\w*)/g)) {
+      if (/PUBLISHABLE|PUBLIC_KEY|SITE_KEY/.test(mm[1])) continue;
+      pubEnv.add(mm[1]);
+    }
+    for (const name of pubEnv) {
+      findings.push({ level: 'HIGH', code: 'SECRET_IN_PUBLIC_ENV', where: file, item: name,
+        text: `"${name}" is a browser-visible variable (the prefix ships it to every visitor). Anyone can copy this key and run up your bill or send email as you. Move the call into a server function and rotate the key.` });
+    }
+    // Hard-coded paid API keys
+    const browser = isBrowserFile(file);
+    for (const [re, label] of AI_KEYS) {
+      if (re.test(text)) {
+        findings.push({ level: browser ? 'HIGH' : 'MEDIUM', code: browser ? 'AI_KEY_IN_BROWSER_CODE' : 'AI_KEY_HARDCODED', where: file, item: `${label} key in ${base}`,
+          text: browser
+            ? `A ${label} API key is written into "${base}", which ends up in the browser. Anyone can copy it and use your paid account. Rotate it now and call ${label} from a server function instead.`
+            : `A ${label} API key is written into "${base}" (server code, but saved in the repo). Rotate it and load it from a secret/env variable instead.` });
+      }
     }
     if (/\bsk_live_[A-Za-z0-9]{10,}/.test(text)) {
       findings.push({ level: 'HIGH', code: 'STRIPE_SECRET_EXPOSED', where: file, item: base,
@@ -199,11 +304,19 @@ export function scanProject(root) {
     const b = path.basename(f);
     return CODE_EXT.has(path.extname(f)) || (/^\.env/.test(b) && !/example|sample|template/i.test(b));
   }).map(f => ({ file: path.relative(root, f), text: fs.readFileSync(f, 'utf8') }));
+  const configs = all.filter(f => path.basename(f) === 'config.toml' && /supabase/.test(f))
+    .map(f => ({ file: path.relative(root, f), text: fs.readFileSync(f, 'utf8') }));
+  const functionCode = new Map();
+  for (const cf of codeFiles) {
+    const m = cf.file.split(path.sep).join('/').match(/supabase\/functions\/([\w-]+)\//);
+    if (m) functionCode.set(m[1], (functionCode.get(m[1]) || '') + '\n' + cf.text);
+  }
   const a = analyzeSql(sqlFiles);
   const b = analyzeCode(codeFiles);
+  const c = analyzeConfig(configs, functionCode);
   const order = { HIGH: 0, MEDIUM: 1, LOW: 2, INFO: 3 };
-  const findings = [...a.findings, ...b.findings].sort((x, y) => order[x.level] - order[y.level]);
-  return { sqlFiles: sqlFiles.length, codeFiles: codeFiles.length, tables: a.tables, findings };
+  const findings = [...a.findings, ...b.findings, ...c.findings].sort((x, y) => order[x.level] - order[y.level]);
+  return { sqlFiles: sqlFiles.length, codeFiles: codeFiles.length, configs: configs.length, tables: a.tables, findings };
 }
 
 function main() {
@@ -214,7 +327,7 @@ function main() {
   const r = scanProject(path.resolve(root));
   if (json) { console.log(JSON.stringify(r, null, 2)); }
   else {
-    console.log(`rls-check v0.1.0 — ${r.sqlFiles} SQL files, ${r.codeFiles} code/env files, ${r.tables.length} tables`);
+    console.log(`rls-check v0.2.0 — ${r.sqlFiles} SQL files, ${r.codeFiles} code/env files, ${r.configs} config files, ${r.tables.length} tables`);
     if (r.sqlFiles === 0) console.log('Note: no .sql files found. Export your schema (supabase db dump --schema public) into the folder for the RLS part.');
     if (r.findings.length === 0) console.log('No problems found by these checks. (This is not a full security review.)');
     for (const f of r.findings) console.log(`\n[${f.level}] ${f.code}  ${f.item}  (${f.where})\n  ${f.text}`);

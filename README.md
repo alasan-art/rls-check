@@ -32,7 +32,7 @@ The exit code is `1` if anything HIGH is found, so you can use it in CI.
 ## Example output
 
 ```
-rls-check v0.1.0 — 1 SQL files, 2 code/env files, 4 tables
+rls-check v0.2.0 — 2 SQL files, 3 code/env files, 1 config files, 4 tables
 
 [HIGH] RLS_OFF  invoices  (supabase/migrations/20260101_init.sql)
   Table "invoices" has row-level security OFF. Anyone with the public anon key can read and change every row.
@@ -52,23 +52,32 @@ rls-check v0.1.0 — 1 SQL files, 2 code/env files, 4 tables
 | `SERVICE_KEY_PUBLIC_ENV` | HIGH | The service-role key in a browser variable (`VITE_`, `NEXT_PUBLIC_`, `REACT_APP_`, `EXPO_PUBLIC_`, `PUBLIC_`) |
 | `STRIPE_SECRET_EXPOSED` | HIGH | A live Stripe secret key (`sk_live_…`) in your code |
 | `STRIPE_WEBHOOK_UNVERIFIED` | HIGH | A Stripe webhook handler that never verifies the signature, so anyone can fake a "paid" event |
+| `SECRET_IN_PUBLIC_ENV` | HIGH | A paid API key (OpenAI, Anthropic, Gemini, Groq, Resend, SendGrid, Twilio, …) in a browser variable such as `VITE_OPENAI_API_KEY`: anyone can copy it and run up your bill |
+| `AI_KEY_IN_BROWSER_CODE` | HIGH | An OpenAI / Anthropic / Groq / Replicate / xAI / Perplexity / SendGrid / Resend key written into front-end code |
+| `AI_KEY_HARDCODED` | MEDIUM | The same kind of key written into server code (safer, but still saved in your repo) |
+| `FUNCTION_NO_AUTH` | HIGH | A Supabase Edge Function with `verify_jwt = false` whose code doesn't check the user either, so anyone on the internet can call it (webhooks are excluded) |
+| `STORAGE_OPEN_WRITE` | HIGH | A storage policy that lets people upload, overwrite or delete files without an owner check |
+| `STORAGE_BUCKET_PUBLIC` | MEDIUM | A public storage bucket: every file is viewable by link, which is bad for IDs, invoices and user uploads |
+| `STORAGE_OPEN_READ` | MEDIUM | A storage policy that lets logged-out visitors list and download files |
 | `OPEN_READ_POLICY` | MEDIUM/LOW | A select policy whose condition is `true`, so every row is readable |
 | `ANY_USER_POLICY` | MEDIUM | A policy that only checks `auth.role() = 'authenticated'`, so every user sees every other user's rows |
 | `DEFINER_NO_SEARCH_PATH` | MEDIUM | A `SECURITY DEFINER` function without a fixed `search_path` |
 | `RLS_NO_POLICIES` | INFO | RLS is on but there are no policies, the classic "my data disappeared" bug |
+| `EMAIL_CONFIRM_OFF` | INFO | Email confirmation is off in `supabase/config.toml`; check it's on in your live project |
 
-The checker reads `*.sql`, JS/TS/Vue/Svelte/Astro files and `.env*` files, but skips `.env.example`. It also skips `node_modules`, `dist`, `build`, `.next` and `.git`.
+The checker reads `*.sql`, JS/TS/Vue/Svelte/Astro files, `.env*` files (but skips `.env.example`) and `supabase/config.toml`. It also skips `node_modules`, `dist`, `build`, `.next` and `.git`.
 
 ## If it finds something
 
-- **An exposed key:** rotate it first. Changing the code is not enough, because the old key is already out. In Supabase go to Project Settings → API; in Stripe go to Developers → API keys.
+- **An exposed key** (Supabase, Stripe, OpenAI, …): rotate it first. Changing the code is not enough, because the old key is already out. In Supabase go to Project Settings → API; in Stripe go to Developers → API keys.
 - **RLS problems:** write policies that compare the row's owner column with `auth.uid()`. The [Supabase RLS guide](https://supabase.com/docs/guides/database/postgres/row-level-security) explains how.
 
 ## Known limits
 
 - The SQL is read with pattern matching, not a full parser, so unusual SQL may be missed.
 - It checks files only. Changes made in the Supabase dashboard are invisible unless you export a dump.
-- Storage bucket policies and auth settings are not checked yet.
+- Auth settings are only read from `supabase/config.toml`, which often differs from your live project's dashboard settings.
+- "Browser code" vs "server code" is guessed from folder names (`supabase/functions`, `api`, `server`, …).
 
 ## Development
 

@@ -1,0 +1,10 @@
+project_id = "demo-clean"
+
+[auth.email]
+enable_confirmations = true
+
+[functions.secure-fn]
+verify_jwt = false
+
+[functions.stripe-webhook]
+verify_jwt = false

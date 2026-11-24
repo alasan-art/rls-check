@@ -1,0 +1,11 @@
+project_id = "demo-broken"
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+
+[functions.generate-report]
+verify_jwt = false
+
+[functions.stripe-webhook]
+verify_jwt = false
