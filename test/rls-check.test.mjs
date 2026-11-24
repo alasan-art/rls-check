@@ -51,7 +51,7 @@ test('broken app: finds the typical AI-built mistakes', () => {
     assert.ok(c.includes('MEDIUM:STORAGE_BUCKET_PUBLIC:passports'));
     assert.ok(!c.some(x => x.includes('STORAGE_BUCKET_PUBLIC:logos')), 'private bucket not flagged');
     assert.ok(c.includes('HIGH:STORAGE_OPEN_WRITE:storage / upload passports'));
-    assert.ok(c.includes('MEDIUM:STORAGE_OPEN_READ:storage / read passports'));
+    assert.ok(c.includes('LOW:STORAGE_OPEN_READ:storage / read passports'));
     assert.ok(c.includes('INFO:EMAIL_CONFIRM_OFF:auth.email'));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -80,4 +80,77 @@ test('publishable keys in public env are fine', async () => {
   const { analyzeCode } = await import('../rls-check.mjs');
   const r = analyzeCode([{ file: '.env', text: 'VITE_STRIPE_PUBLISHABLE_KEY=x\nNEXT_PUBLIC_SUPABASE_ANON_KEY=y\n' }]);
   assert.deepEqual(r.findings, []);
+});
+
+// Patterns found in real public projects (accuracy test, 24 Nov 2026)
+test('real-world patterns: no false alarms', async () => {
+  const { analyzeSql } = await import('../rls-check.mjs');
+  const sql = `
+    create table public.jobs (id int); alter table public.jobs enable row level security;
+    create policy "service role full access" on public.jobs for all to service_role using (true) with check (true);
+    do $$ begin
+      if not exists (select 1 from pg_policies where policyname = 'own jobs') then
+        create policy "own jobs" on public.jobs for select to authenticated using (auth.uid() = id::uuid);
+      end if;
+    end $$;
+    create policy "q" on public.made_in_dashboard for select to authenticated using (auth.uid() = owner);
+    create view public.v1 as select * from public.jobs;
+    alter view public.v1 set (security_invoker = on);
+    create function public.f() returns int language sql security definer as $f$ select 1 $f$;
+    alter function public.f() set search_path = '';
+    create table public.old (id int); drop table public.old;
+    insert into storage.buckets (id, name, public) values ('docs', 'docs', true);
+    update storage.buckets set public = false where id = 'docs';`;
+  const r = analyzeSql([{ file: 'a.sql', sql }]);
+  assert.deepEqual(r.findings.map(f => `${f.code}:${f.item}`), []);
+});
+
+test('real-world patterns: still caught', async () => {
+  const { analyzeSql } = await import('../rls-check.mjs');
+  const sql = `
+    create table public.leads (id int); alter table public.leads enable row level security;
+    create policy "anon insert" on public.leads for insert to anon with check (true);
+    do $$ begin
+      create policy "open update" on public.leads for update using (true);
+    end $$;
+    create table public.logs (id int);`;
+  const c = analyzeSql([{ file: 'a.sql', sql }]).findings.map(f => `${f.level}:${f.code}:${f.item}`);
+  assert.ok(c.includes('MEDIUM:OPEN_INSERT_POLICY:leads / anon insert'));
+  assert.ok(c.includes('HIGH:OPEN_WRITE_POLICY:leads / open update'), 'policy inside DO block');
+  assert.ok(c.includes('HIGH:RLS_OFF:logs'));
+});
+
+test('server function protected by a secret header is not flagged', async () => {
+  const { analyzeConfig } = await import('../rls-check.mjs');
+  const code = `const expected = Deno.env.get('INTERNAL_FUNCTION_SECRET');
+    if (!expected || req.headers.get('x-internal-secret') !== expected) return json(401, {});
+    await supabase.from('x').insert({});`;
+  const open = `const ip = req.headers.get('x-forwarded-for'); return new Response(ip);`;
+  const r = analyzeConfig([{ file: 'supabase/config.toml', text: '[functions.cron-job]\nverify_jwt = false\n[functions.whoami]\nverify_jwt = false\n' }],
+    new Map([['cron-job', code], ['whoami', open]]));
+  assert.deepEqual(r.findings.map(f => `${f.level}:${f.code}:${f.item}`), ['MEDIUM:FUNCTION_NO_AUTH:whoami']);
+});
+
+test('RLS enabled in a loop, or table revoked from API roles, is not RLS_OFF', async () => {
+  const { analyzeSql } = await import('../rls-check.mjs');
+  const sql = `create table public.a (id int); create table public.b (id int); create table public.c (id int);
+    do $$ declare t text; begin
+      foreach t in array array['a','b'] loop
+        execute format('alter table public.%I enable row level security', t);
+      end loop; end $$;
+    revoke all on public.c from public, anon, authenticated;`;
+  const r = analyzeSql([{ file: 'a.sql', sql }]);
+  assert.deepEqual(r.findings.filter(f => f.code === 'RLS_OFF'), []);
+});
+
+test('"auth.uid() is not null" means any logged-in user, not the owner', async () => {
+  const { analyzeSql } = await import('../rls-check.mjs');
+  const sql = `create table public.notes (id int, owner uuid); alter table public.notes enable row level security;
+    create policy "logged in" on public.notes for select using (auth.uid() is not null);
+    create policy "own" on public.notes for update using (auth.uid() is not null and owner = auth.uid());
+    create policy "upload" on storage.objects for insert with check (bucket_id = 'docs' and auth.uid() is not null);`;
+  const c = analyzeSql([{ file: 'a.sql', sql }]).findings.map(f => `${f.code}:${f.item}`);
+  assert.ok(c.includes('ANY_USER_POLICY:notes / logged in'));
+  assert.ok(!c.includes('ANY_USER_POLICY:notes / own'));
+  assert.ok(c.includes('STORAGE_OPEN_WRITE:storage / upload'));
 });
