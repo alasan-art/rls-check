@@ -1,7 +1,7 @@
 // rls-check core v0.2.0 — shared by the command line (rls-check.mjs) and the browser page (index.html).
 // Pure functions only: no file system, no network. Input is a list of {file, text}.
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 export const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.vercel', '.output', 'coverage']);
 export const CODE_EXT = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue', '.svelte', '.astro']);
 

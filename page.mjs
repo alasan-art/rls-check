@@ -6,6 +6,11 @@ const MAX_FILE = 2 * 1024 * 1024; // skip files over 2 MB (bundles, data dumps)
 const LABEL = { HIGH: 'High risk', MEDIUM: 'Medium', LOW: 'Low', INFO: 'Info' };
 let lastReport = '';
 
+// "Get it fixed" offer, shown under high-risk results. It stays hidden while FIX_URL is empty,
+// so the page never points to a listing that isn't live yet. Set FIX_URL to the live listing.
+// A normal link: clicking it opens the listing; this page still sends nothing anywhere.
+const FIX_URL = '';
+
 $('ver').textContent = 'v' + VERSION;
 
 function setStatus(msg) { $('status').textContent = msg; }
@@ -35,6 +40,12 @@ function render(r, sourceLabel) {
   $('summary').innerHTML = r.findings.length
     ? pills
     : `<span class="pill OK">No problems found by these checks</span>`;
+  const fix = $('fix');
+  if (FIX_URL && counts.HIGH) {
+    $('fixLink').href = FIX_URL;
+    $('fixCount').textContent = counts.HIGH === 1 ? '1 high-risk problem' : `${counts.HIGH} high-risk problems`;
+    fix.hidden = false;
+  } else fix.hidden = true;
   const notes = [];
   if (r.sqlFiles === 0) notes.push('No .sql files were found, so the database rules were not checked. Make sure the folder contains supabase/migrations, or paste your SQL.');
   $('list').innerHTML =
@@ -141,9 +152,15 @@ create policy "upload passports" on storage.objects for insert to anon with chec
     headers: { Authorization: 'Bearer ' + Deno.env.get('OPENAI_API_KEY') }, body: JSON.stringify({ prompt }) });
   return new Response(await r.text());
 });` },
+  { file: 'supabase/functions/stripe-webhook/index.ts', text: `// stripe webhook: trusts the request body without checking the signature
+Deno.serve(async (req) => {
+  const event = await req.json();
+  if (event.type === 'checkout.session.completed') { /* mark user as paid */ }
+  return new Response('ok');
+});` },
   { file: '.env', text: 'VITE_SUPABASE_URL=https://example.supabase.co\nVITE_OPENAI_API_KEY=placeholder\n' },
 ];
-$('demoBtn').addEventListener('click', () => render(scanFiles(DEMO), 'the example app'));
+$('demoBtn').addEventListener('click', () => render(scanFiles(DEMO), 'the example app (invented, with typical mistakes)'));
 
 // Copy report
 $('copyBtn').addEventListener('click', async () => {
