@@ -8,6 +8,8 @@ AI app builders get you most of the way to a working app. But many of these apps
 - **Zero dependencies.** You only need Node.js 18 or newer.
 - **It is not a full security review.** It catches the common mistakes, not everything.
 
+> **New study:** [We checked 30 public Supabase apps built with AI tools. 21 had at least one high-risk hole.](docs/study-30-projects.md)
+
 ## Use it in your browser (no install)
 
 Open **https://alasan-art.github.io/rls-check/**, then drag in your project folder (or click *See an example*). The page runs entirely in your browser: its security policy blocks all network requests, so your files can't leave your computer.
@@ -79,7 +81,7 @@ The checker reads `*.sql`, JS/TS/Vue/Svelte/Astro files, `.env*` files (but skip
 
 ## How accurate is it?
 
-We tested v0.2 on 30 public open-source Supabase projects built with AI tools (about 2,300 tables). The first draft raised 836 HIGH warnings. After fixing every false-alarm pattern we found (service-role-only policies, policies inside `DO` blocks, views and functions fixed in later migrations, tables enabled in loops, secret-header and shared-helper auth in Edge Functions), it raises 192, and every one we hand-checked was real. Results are kept private, and no project was contacted or named.
+We tested v0.2 on 30 public open-source Supabase projects built with AI tools (about 2,300 tables). The first draft raised 836 HIGH warnings. After fixing every false-alarm pattern we found (service-role-only policies, policies inside `DO` blocks, views and functions fixed in later migrations, tables enabled in loops, secret-header and shared-helper auth in Edge Functions), it raises 192, and every one we hand-checked was real. No project was contacted or named. The overall numbers and the five most common mistakes are in the [30-project study](docs/study-30-projects.md).
 
 ## Known limits
 
